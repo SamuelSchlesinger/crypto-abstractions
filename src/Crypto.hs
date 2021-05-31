@@ -21,6 +21,7 @@ module Crypto
   , AsymmetricEncryptionProtocol(..)
   , SymmetricEncryptionProtocol(..)
   , PGP
+  , MonadPGP(..)
   ) where
 
 import Data.Kind (Type, Constraint)
@@ -190,4 +191,3 @@ instance (Encryptable asym (Key sym), SymmetricEncryptionProtocol sym, Asymmetri
             Right key -> decryptWith key symBody >>= \case
               Left err -> pure (Left $ PGPSymmetricEncryptionError err)
               Right a -> pure (Right a)
-        
