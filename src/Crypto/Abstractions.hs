@@ -1,3 +1,6 @@
+{-# OPTIONS_HADDOCK show-extensions  #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE GADTs #-}
@@ -14,16 +17,65 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-module Crypto
-  ( PublicKeyProtocol(..)
+
+{-|
+Module: Crypto.Abstractions
+Description: A number of cryptographic interfaces
+Copyright: (c) Samuel Schlesinger, 2021
+Maintainer: sgschlesinger@gmail.com
+License: MIT
+
+This module contains interfaces for symmetric and asymmetric encryption, as well as digital
+signature protocols.
+-}
+
+module Crypto.Abstractions
+  ( 
+    -- * Public + Private Keys
+    --
+    -- | Public key encryption is important for establishing identity and creating secure,
+    -- private communication between network actors. In many systems, public keys
+    -- are used as a sort of ID, and private keys are used in lieu of passwords.
+    PublicKeyProtocol(..)
+
+    -- * Digital Signatures
+    --
+    -- | Digital signatures are important mechanisms, in the context of a public key protocol,
+    -- to prove to another that you've seen, and perhaps assented to, some piece of data.
   , DigitalSignatureProtocol(..)
+
+    -- * Encryption and Decryption
+    --
+    -- | Across asymmetric and symmetric encryption protocols, there are common aspects which are embodied
+    -- in this interface.
   , EncryptionProtocol(..)
+
+    -- | An interface for asymmetric encryption. This is based off of the public key interface,
+    -- and allows you to encrypt a message for only a specific reader, given their public key.
   , AsymmetricEncryptionProtocol(..)
+  
+    -- | An interface for symmetric encryption, which allows one to encrypt and decrypt based off of
+    -- a shared key.
   , SymmetricEncryptionProtocol(..)
+  
+    -- | A derivative asymmetric encryption protocol which layers an asymmetric protocol on
+    -- top of a symmetric one to achieve the performance characteristics of the symmetric protocol
+    -- in an asymmetric protocol.
   , PGP
+    -- | The 'Environment' of the 'PGP' protocol:
   , MonadPGP(..)
+
+    -- | A derivative asymmetric encryption protocol which composes two asymmetric protocols on top
+    -- of one another to achieve each of their maximum security characteristics (hopefully).
+  , (:>>:)
+    -- | The 'Environment' of the '(:>>:)' protocol:
+  , MonadAsymmetricProduct(..)
+
+    -- | A witness for a constraint, needed for technical reasons. 
+  , Dict(..)
   ) where
 
+import Control.Monad ((>=>)) 
 import Data.Kind (Type, Constraint)
 import Data.Coerce (coerce)
 
@@ -150,7 +202,7 @@ class EncryptionProtocol protocol => SymmetricEncryptionProtocol protocol where
 -- characeteristics of symmetric protocols.
 data PGP asymmetricProtocol symmetricProtocol
 
-instance (SymmetricEncryptionProtocol sym, AsymmetricEncryptionProtocol asym) => PublicKeyProtocol (PGP asym sym) where
+instance (Encryptable asym (Key sym), SymmetricEncryptionProtocol sym, AsymmetricEncryptionProtocol asym) => PublicKeyProtocol (PGP asym sym) where
   newtype Settings (PGP asym sym) = PGPSettings { asymmetricSettings :: Settings asym }
   newtype PublicKey (PGP asym sym) = PGPPublicKey { unPublicKey :: PublicKey asym }
   newtype PrivateKey (PGP asym sym) = PGPrivateKey { unPrivateKey :: PrivateKey asym }
@@ -166,9 +218,15 @@ instance (Encryptable asym (Key sym), SymmetricEncryptionProtocol sym, Asymmetri
 
 class Monad m => MonadPGP asym sym m where
   genKey :: m (Key sym)
-  asymEnv :: Dict (Environment (PGP asym sym) m) -> Dict (Environment asym m)
-  symEnv :: Dict (Environment (PGP asym sym) m) -> Dict (Environment sym m)
+  pgpEnv :: Dict (Environment (PGP asym sym) m) -> Dict (Environment asym m, Environment sym m)
 
+-- |
+-- === Summary
+-- A dictionary for a given constraint, or perhaps a witness of it.
+--
+-- === Discussion
+-- This is also defined in the lovely constraints library but I am loath to depend
+-- on another package for something so simple.
 data Dict c where
   Dict :: c => Dict c
 
@@ -176,18 +234,63 @@ instance (Encryptable asym (Key sym), SymmetricEncryptionProtocol sym, Asymmetri
   encryptFor :: forall m a. (Environment (PGP asym sym) m, Encryptable (PGP asym sym) a) => PublicKey (PGP asym sym) -> a -> m (Message (PGP asym sym)) 
   encryptFor publicKey a = do
     key <- genKey @asym @sym
-    case (asymEnv (Dict @(Environment (PGP asym sym) m)), symEnv (Dict @(Environment (PGP asym sym) m))) of
-      (Dict, Dict) -> do
+    case pgpEnv (Dict @(Environment (PGP asym sym) m)) of
+      Dict -> do
         asymmetricallyEncryptedKey <- encryptFor @asym (coerce publicKey) key
         symmetricallyEncryptedBody <- encryptWith key a
         pure PGPMessage{..}
   decryptAs :: forall m a. (Environment (PGP asym sym) m, Encryptable (PGP asym sym) a) => PrivateKey (PGP asym sym) -> Message (PGP asym sym) -> m (Either (EncryptionError (PGP asym sym)) a)
   decryptAs privateKey (PGPMessage asymKey symBody) =
-    case (asymEnv (Dict @(Environment (PGP asym sym) m)), symEnv (Dict @(Environment (PGP asym sym) m))) of
-      (Dict, Dict) ->
+    case pgpEnv (Dict @(Environment (PGP asym sym) m)) of
+      Dict ->
         decryptAs @asym (coerce privateKey) asymKey
           >>= \case
             Left err -> pure (Left $ PGPAsymmetricEncryptionError err)
             Right key -> decryptWith key symBody >>= \case
               Left err -> pure (Left $ PGPSymmetricEncryptionError err)
               Right a -> pure (Right a)
+
+-- |
+-- === Summary
+-- An asymmetric protocol which layers one asymmetric protocol over another. It will combine their security guarantees.
+--
+-- === Discussion
+-- I don't know this to be useful, though I know it to be definable.
+data asym :>>: asym'
+
+instance (Encryptable asym' (Message asym), AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => PublicKeyProtocol (asym :>>: asym') where
+  data Settings (asym :>>: asym') = Settings asym :>?>: Settings asym'
+  data PublicKey (asym :>>: asym') = PublicKey asym :>!>: PublicKey asym'
+  data PrivateKey (asym :>>: asym') = PrivateKey asym :>.>: PrivateKey asym'
+  generate (asymSettings :>?>: asym'Settings) = (:>.>:) <$> generate asymSettings <*> generate asym'Settings
+  getSettings (private :>.>: private') = getSettings private :>?>: getSettings private'
+  getPublicKey (private :>.>: private') = getPublicKey private :>!>: getPublicKey private'
+
+class Monad m => MonadAsymmetricProduct asym asym' m where
+  productEnv :: Dict (Environment (asym :>>: asym') m) -> Dict (Environment asym m, Environment asym' m)
+
+class (Encryptable asym x, Encryptable asym' x) => DoubleEncryptable asym asym' x
+instance (Encryptable asym x, Encryptable asym' x) => DoubleEncryptable asym asym' x
+
+instance (Encryptable asym' (Message asym), AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => EncryptionProtocol (asym :>>: asym') where
+  type Environment (asym :>>: asym') = MonadAsymmetricProduct asym asym'
+  newtype Message (asym :>>: asym') = AsymmetricProductMessage { unAsymmetricProductMessage :: Message asym' }
+  type Encryptable (asym :>>: asym') = DoubleEncryptable asym asym'
+  data EncryptionError (asym :>>: asym') = AsymmetricProductFirstProtocolError (EncryptionError asym) | AsymmetricProductSecondProtocolError (EncryptionError asym')
+  
+instance (Encryptable asym' (Message asym), AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => AsymmetricEncryptionProtocol (asym :>>: asym') where
+  encryptFor :: forall m a. (Environment (asym :>>: asym') m, Encryptable (asym :>>: asym') a) => PublicKey (asym :>>: asym') -> a -> m (Message (asym :>>: asym'))
+  encryptFor (publicKey :>!>: publicKey') = case productEnv @asym @asym' @m Dict of
+    Dict -> fmap (fmap AsymmetricProductMessage) $ encryptFor publicKey >=> encryptFor publicKey'
+  decryptAs :: forall m a. (Environment (asym :>>: asym') m, Encryptable (asym :>>: asym') a) => PrivateKey (asym :>>: asym') -> Message (asym :>>: asym') -> m (Either (EncryptionError (asym :>>: asym')) a)
+  decryptAs (privateKey :>.>: privateKey') = case productEnv @asym @asym' @m Dict of
+    Dict -> \(unAsymmetricProductMessage -> message') -> do
+      mMessage <- decryptAs privateKey' message'
+      case mMessage of
+        Left err -> pure (Left $ AsymmetricProductSecondProtocolError err)
+        Right message -> either (Left . AsymmetricProductFirstProtocolError) pure <$> decryptAs privateKey message
+
+-- TODO(sam)
+-- === Summary
+-- An asymmetric protocol which allows one to choose between two different schemes at will.
+data asym :+: asym'

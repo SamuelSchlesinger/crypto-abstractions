@@ -1,12 +1,13 @@
 cabal-version:      2.4
 name:               crypto-abstractions
+description:        A number of related interfaces having to do with cryptography, as well as various derivative constructions.
 version:            0.1.0.0
 author:             Samuel Schlesinger
 maintainer:         samuel@simspace.com
 extra-source-files: CHANGELOG.md
 
 library
-    exposed-modules:  Crypto
+    exposed-modules:  Crypto.Abstractions
     build-depends:    base ^>=4.14.1.0
     hs-source-dirs:   src
     default-language: Haskell2010
