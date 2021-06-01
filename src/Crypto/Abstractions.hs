@@ -71,6 +71,11 @@ module Crypto.Abstractions
     -- | The 'Environment' of the '(:>>:)' protocol:
   , MonadAsymmetricProduct(..)
 
+    -- | A derivative asymmetric encryption protocol which composes two asymmetric protocols next to
+    -- each other to achieve their minimum security characteristics (hopefully).
+  , (:++:)
+  , MonadAsymmetricSum(..)
+
     -- | A witness for a constraint, needed for technical reasons. 
   , Dict(..)
   ) where
@@ -253,9 +258,6 @@ instance (Encryptable asym (Key sym), SymmetricEncryptionProtocol sym, Asymmetri
 -- |
 -- === Summary
 -- An asymmetric protocol which layers one asymmetric protocol over another. It will combine their security guarantees.
---
--- === Discussion
--- I don't know this to be useful, though I know it to be definable.
 data asym :>>: asym'
 
 instance (Encryptable asym' (Message asym), AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => PublicKeyProtocol (asym :>>: asym') where
@@ -290,7 +292,37 @@ instance (Encryptable asym' (Message asym), AsymmetricEncryptionProtocol asym, A
         Left err -> pure (Left $ AsymmetricProductSecondProtocolError err)
         Right message -> either (Left . AsymmetricProductFirstProtocolError) pure <$> decryptAs privateKey message
 
--- TODO(sam)
+-- |
 -- === Summary
 -- An asymmetric protocol which allows one to choose between two different schemes at will.
-data asym :+: asym'
+data asym :++: asym'
+
+instance (AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => PublicKeyProtocol (asym :++: asym') where
+  data Settings (asym :++: asym') = Settings asym :+?+: Settings asym'
+  data PublicKey (asym :++: asym') = PublicKey asym :+!+: PublicKey asym'
+  data PrivateKey (asym :++: asym') = PrivateKey asym :+.+: PrivateKey asym'
+  generate (asymSettings :+?+: asym'Settings) = (:+.+:) <$> generate asymSettings <*> generate asym'Settings
+  getSettings (private :+.+: private') = getSettings private :+?+: getSettings private'
+  getPublicKey (private :+.+: private') = getPublicKey private :+!+: getPublicKey private'
+
+class Monad m => MonadAsymmetricSum asym asym' m where
+  sumEnv :: Dict (Environment (asym :++: asym') m) -> Dict (Environment asym m, Environment asym' m)
+  sumChoice :: m (Either () ())
+
+instance (AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => EncryptionProtocol (asym :++: asym') where
+  type Environment (asym :++: asym') = MonadAsymmetricSum asym asym'
+  newtype Message (asym :++: asym') = AsymmetricSumMessage { unAsymmetricSumMessage :: Either (Message asym) (Message asym') }
+  type Encryptable (asym :++: asym') = DoubleEncryptable asym asym'
+  data EncryptionError (asym :++: asym') = AsymmetricSumFirstProtocolError (EncryptionError asym) | AsymmetricSumSecondProtocolError (EncryptionError asym')
+
+instance (AsymmetricEncryptionProtocol asym, AsymmetricEncryptionProtocol asym') => AsymmetricEncryptionProtocol (asym :++: asym') where
+  encryptFor :: forall m a. (Environment (asym :++: asym') m, Encryptable (asym :++: asym') a) => PublicKey (asym :++: asym') -> a -> m (Message (asym :++: asym'))
+  encryptFor (publicKey :+!+: publicKey') a = case sumEnv @asym @asym' @m Dict of
+    Dict -> sumChoice @asym @asym' @m >>= \case
+      Left () -> (AsymmetricSumMessage . Left) <$> encryptFor publicKey a
+      Right () -> (AsymmetricSumMessage . Right) <$> encryptFor publicKey' a
+  decryptAs :: forall m a. (Environment (asym :++: asym') m, Encryptable (asym :++: asym') a) => PrivateKey (asym :++: asym') -> Message (asym :++: asym') -> m (Either (EncryptionError (asym :++: asym')) a)
+  decryptAs (privateKey :+.+: privateKey') (unAsymmetricSumMessage -> msg) = case sumEnv @asym @asym' @m Dict of
+    Dict -> case msg of
+      Left msg -> either (Left . AsymmetricSumFirstProtocolError) Right <$> decryptAs privateKey msg
+      Right msg' -> either (Left . AsymmetricSumSecondProtocolError) Right <$> decryptAs privateKey' msg' 
